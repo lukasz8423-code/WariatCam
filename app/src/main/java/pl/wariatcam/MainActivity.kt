@@ -22,6 +22,8 @@ import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.extensions.ExtensionMode
+import androidx.camera.extensions.ExtensionsManager
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
@@ -35,6 +37,8 @@ class MainActivity : ComponentActivity() {
     private var camera: Camera? = null
     private var nightModeOn = false
     private var previousExposureIndex = 0
+    private var cameraProvider: ProcessCameraProvider? = null
+    private var nightCameraSelector: CameraSelector? = null
     private val cameraPermissionRequest = 1001
     private val updateExecutor = Executors.newSingleThreadExecutor()
 
@@ -132,24 +136,39 @@ class MainActivity : ComponentActivity() {
                 .setPositiveButton("OK", null).show()
             return
         }
-        val exposureState = currentCamera.cameraInfo.exposureState
-        val range = exposureState.exposureCompensationRange
-        if (range.lower == 0 && range.upper == 0) {
-            AlertDialog.Builder(this).setTitle("Tryb nocny niedostępny")
-                .setMessage("Ten aparat nie udostępnia regulacji ekspozycji przez aplikację. Nie zmieniamy ustawień lampy LED.")
-                .setPositiveButton("OK", null).show()
-            return
-        }
         if (!nightModeOn) {
+            val extensionSelector = nightCameraSelector
+            if (extensionSelector != null) {
+                bindCamera(extensionSelector)
+                nightModeOn = true
+                nightButton.text = "☾ NOCNY: WŁ."
+                return
+            }
+            val exposureState = currentCamera.cameraInfo.exposureState
+            val range = exposureState.exposureCompensationRange
+            if (range.lower == 0 && range.upper == 0) {
+                AlertDialog.Builder(this).setTitle("Tryb nocny niedostępny")
+                    .setMessage("Ten aparat nie udostępnia trybu nocnego CameraX ani regulacji ekspozycji. Nie zmieniamy ustawień lampy LED.")
+                    .setPositiveButton("OK", null).show()
+                return
+            }
             previousExposureIndex = exposureState.exposureCompensationIndex
             val target = minOf(range.upper, maxOf(1, range.upper / 2))
             currentCamera.cameraControl.setExposureCompensationIndex(target)
             nightModeOn = true
             nightButton.text = "☾ NOCNY: WŁ."
         } else {
-            currentCamera.cameraControl.setExposureCompensationIndex(
-                previousExposureIndex.coerceIn(range.lower, range.upper)
-            )
+            val provider = cameraProvider
+            if (provider != null) {
+                bindCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+            } else {
+                currentCamera.cameraControl.setExposureCompensationIndex(
+                    previousExposureIndex.coerceIn(
+                        currentCamera.cameraInfo.exposureState.exposureCompensationRange.lower,
+                        currentCamera.cameraInfo.exposureState.exposureCompensationRange.upper
+                    )
+                )
+            }
             nightModeOn = false
             nightButton.text = "☾ NOCNY: WYŁ."
         }
@@ -216,16 +235,33 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun bindCamera(selector: CameraSelector) {
+        val provider = cameraProvider ?: return
+        val preview = Preview.Builder().build().also {
+            it.surfaceProvider = previewView.surfaceProvider
+        }
+        provider.unbindAll()
+        camera = provider.bindToLifecycle(this, selector, preview)
+    }
+
     private fun startCamera() {
         statusView.text = "WariatCam • kamera lokalna (test)"
         val providerFuture = ProcessCameraProvider.getInstance(this)
         providerFuture.addListener({
             try {
                 val provider = providerFuture.get()
-                val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
-                provider.unbindAll()
-                camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview)
-                nightButton.isEnabled = camera?.cameraInfo?.exposureState?.exposureCompensationRange?.let { it.lower != 0 || it.upper != 0 } == true
+                cameraProvider = provider
+                try {
+                    val extensions = ExtensionsManager.getInstanceAsync(this, provider).get()
+                    nightCameraSelector = if (extensions.isExtensionAvailable(CameraSelector.DEFAULT_BACK_CAMERA, ExtensionMode.NIGHT)) {
+                        extensions.getExtensionEnabledCameraSelector(CameraSelector.DEFAULT_BACK_CAMERA, ExtensionMode.NIGHT)
+                    } else null
+                } catch (_: Exception) {
+                    nightCameraSelector = null
+                }
+                bindCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+                nightButton.isEnabled = nightCameraSelector != null ||
+                    camera?.cameraInfo?.exposureState?.exposureCompensationRange?.let { it.lower != 0 || it.upper != 0 } == true
             } catch (error: Exception) {
                 statusView.text = "Nie udało się uruchomić kamery: ${error.localizedMessage ?: "błąd"}"
             }
