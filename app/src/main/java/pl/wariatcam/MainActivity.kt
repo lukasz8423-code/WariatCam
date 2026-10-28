@@ -10,21 +10,30 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
+import android.graphics.Color
 import android.view.Gravity
 import android.view.ViewGroup
+import android.widget.Button
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import android.widget.TextView
 import androidx.activity.ComponentActivity
+import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.core.app.ActivityCompat
 import androidx.core.content.ContextCompat
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowInsetsCompat
 
 class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
+    private lateinit var ledButton: Button
+    private var camera: Camera? = null
+    private var torchOn = false
     private val cameraPermissionRequest = 1001
     private val updateExecutor = Executors.newSingleThreadExecutor()
 
@@ -39,26 +48,94 @@ class MainActivity : ComponentActivity() {
         root.addView(previewView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT
         ))
+
         statusView = TextView(this).apply {
             text = "WariatCam • uruchamianie kamery…"
             textSize = 16f
-            setTextColor(0xFFFFFFFF.toInt())
-            setPadding(28, 22, 28, 22)
-            setBackgroundColor(0xB9000000.toInt())
+            setTextColor(Color.WHITE)
+            setPadding(dp(16), dp(10), dp(16), dp(10))
+            setBackgroundColor(0xD9000000.toInt())
             gravity = Gravity.CENTER_VERTICAL
         }
         root.addView(statusView, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP
         ))
+
+        val controls = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER
+            setPadding(dp(12), dp(8), dp(12), dp(8))
+            setBackgroundColor(0xD9000000.toInt())
+        }
+        val menuButton = Button(this).apply {
+            text = "☰ MENU"
+            setOnClickListener { showMenu() }
+        }
+        ledButton = Button(this).apply {
+            text = "☼ LED: WYŁ."
+            setOnClickListener { toggleTorch() }
+        }
+        controls.addView(menuButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        controls.addView(ledButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        root.addView(controls, FrameLayout.LayoutParams(
+            ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
+        ))
+
+        ViewCompat.setOnApplyWindowInsetsListener(root) { _, insets ->
+            val top = insets.getInsets(WindowInsetsCompat.Type.statusBars()).top
+            val bottom = insets.getInsets(WindowInsetsCompat.Type.navigationBars()).bottom
+            statusView.setPadding(dp(16), top + dp(8), dp(16), dp(10))
+            controls.setPadding(dp(12), dp(8), dp(12), bottom + dp(8))
+            insets
+        }
+
         setContentView(root)
+        statusView.text = "WariatCam • kamera lokalna (test)"
         statusView.setOnClickListener { checkForUpdates() }
-        statusView.text = "WariatCam • kamera lokalna (test)\\nDotknij tutaj, aby sprawdzić aktualizacje"
 
         if (ContextCompat.checkSelfPermission(this, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
             startCamera()
         } else {
             ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.CAMERA), cameraPermissionRequest)
         }
+    }
+
+    private fun dp(value: Int): Int = (value * resources.displayMetrics.density).toInt()
+
+    private fun showMenu() {
+        val items = arrayOf("Włącz/wyłącz doświetlenie LED", "Sprawdź aktualizacje", "Informacje o trybie nocnym")
+        AlertDialog.Builder(this)
+            .setTitle("WariatCam — menu")
+            .setItems(items) { _, which ->
+                when (which) {
+                    0 -> toggleTorch()
+                    1 -> checkForUpdates()
+                    2 -> AlertDialog.Builder(this)
+                        .setTitle("Tryb nocny")
+                        .setMessage("Telefon nie ma automatycznie trybu noktowizyjnego. LED włącza zwykłą lampę błyskową, która doświetla bliskie obiekty, ale nie zastępuje kamery monitoringu z diodami podczerwieni (IR). Do prawdziwego obrazu IR potrzebny jest sprzęt z oświetlaczem podczerwieni.")
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+            .setNegativeButton("Zamknij", null)
+            .show()
+    }
+
+    private fun toggleTorch() {
+        val currentCamera = camera
+        if (currentCamera == null) {
+            AlertDialog.Builder(this).setMessage("Kamera jeszcze się uruchamia. Spróbuj za chwilę.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        if (!currentCamera.cameraInfo.hasFlashUnit()) {
+            AlertDialog.Builder(this).setTitle("Brak lampy LED")
+                .setMessage("Ten aparat nie udostępnia lampy błyskowej, więc nie można go tak doświetlić.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        torchOn = !torchOn
+        currentCamera.cameraControl.enableTorch(torchOn)
+        ledButton.text = if (torchOn) "☼ LED: WŁ." else "☼ LED: WYŁ."
     }
 
     private fun checkForUpdates() {
@@ -97,7 +174,7 @@ class MainActivity : ComponentActivity() {
                 runOnUiThread {
                     statusView.text = "WariatCam • kamera lokalna (test)"
                     AlertDialog.Builder(this).setTitle("Nie udało się sprawdzić aktualizacji")
-                        .setMessage("Sprawdź internet i spróbuj ponownie.\\n" + (e.localizedMessage ?: "Błąd połączenia"))
+                        .setMessage("Sprawdź internet i spróbuj ponownie.\n" + (e.localizedMessage ?: "Błąd połączenia"))
                         .setPositiveButton("OK", null).show()
                 }
             }
@@ -130,7 +207,8 @@ class MainActivity : ComponentActivity() {
                 val provider = providerFuture.get()
                 val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
                 provider.unbindAll()
-                provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+                camera = provider.bindToLifecycle(this, CameraSelector.DEFAULT_BACK_CAMERA, preview)
+                ledButton.isEnabled = camera?.cameraInfo?.hasFlashUnit() == true
             } catch (error: Exception) {
                 statusView.text = "Nie udało się uruchomić kamery: ${error.localizedMessage ?: "błąd"}"
             }
