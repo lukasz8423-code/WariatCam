@@ -5,6 +5,9 @@ import android.content.pm.PackageManager
 import android.os.Bundle
 import android.content.Intent
 import android.net.Uri
+import android.app.DownloadManager
+import android.os.Environment
+import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -196,6 +199,36 @@ class MainActivity : ComponentActivity() {
         cam.cameraControl.enableTorch(torchOn)
         torchButton.text = if (torchOn) "LED: WŁ." else "LED: WYŁ."
     }
+    private fun downloadApk(apkUrl: String, tag: String) {
+        try {
+            val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+            val request = DownloadManager.Request(Uri.parse(apkUrl))
+                .setTitle("WariatCam $tag")
+                .setDescription("Pobieranie aktualizacji aplikacji…")
+                .setMimeType("application/vnd.android.package-archive")
+                .setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setAllowedOverMetered(true)
+                .setAllowedOverRoaming(false)
+                .setDestinationInExternalPublicDir(
+                    Environment.DIRECTORY_DOWNLOADS,
+                    "WariatCam-$tag.apk"
+                )
+            manager.enqueue(request)
+            statusView.text = "WariatCam • pobieranie aktualizacji…"
+            Toast.makeText(
+                this,
+                "Pobieranie rozpoczęte. Po zakończeniu stuknij powiadomienie, aby zainstalować APK.",
+                Toast.LENGTH_LONG
+            ).show()
+        } catch (e: Exception) {
+            AlertDialog.Builder(this)
+                .setTitle("Nie udało się pobrać aktualizacji")
+                .setMessage(e.localizedMessage ?: "Sprawdź dostęp do internetu i miejsce w pamięci.")
+                .setPositiveButton("OK", null)
+                .show()
+        }
+    }
+
     private fun checkForUpdates() {
         statusView.text = "WariatCam • sprawdzam aktualizacje…"
         updateExecutor.execute {
@@ -223,9 +256,9 @@ class MainActivity : ComponentActivity() {
                         AlertDialog.Builder(this).setTitle("Aplikacja jest aktualna").setMessage("Masz wersję $current.").setPositiveButton("OK", null).show()
                     } else {
                         AlertDialog.Builder(this).setTitle("Dostępna aktualizacja: $tag")
-                            .setMessage("Naciśnij Pobierz APK. Po pobraniu otwórz plik z powiadomienia lub folderu Pobrane i zatwierdź aktualizację.")
+                            .setMessage("Pobiorę plik APK do folderu Pobrane. Po zakończeniu stuknij powiadomienie o pobraniu, aby uruchomić instalator Androida.")
                             .setNegativeButton("Później", null)
-                            .setPositiveButton("Pobierz APK") { _, _ -> startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(apkUrl))) }.show()
+                            .setPositiveButton("Pobierz APK") { _, _ -> downloadApk(apkUrl, tag) }.show()
                     }
                 }
             } catch (e: Exception) {
