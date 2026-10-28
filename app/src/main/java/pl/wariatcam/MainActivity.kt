@@ -6,6 +6,9 @@ import android.os.Bundle
 import android.content.Intent
 import android.net.Uri
 import android.app.DownloadManager
+import android.content.BroadcastReceiver
+import android.content.Context
+import android.content.IntentFilter
 import android.os.Environment
 import android.widget.Toast
 import androidx.appcompat.app.AlertDialog
@@ -53,6 +56,46 @@ class MainActivity : ComponentActivity() {
     private var nightCameraSelector: CameraSelector? = null
     private val cameraPermissionRequest = 1001
     private val updateExecutor = Executors.newSingleThreadExecutor()
+    private var pendingDownloadId = -1L
+    private var downloadReceiverRegistered = false
+
+    private val downloadCompleteReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action != DownloadManager.ACTION_DOWNLOAD_COMPLETE) return
+            val completedId = intent.getLongExtra(DownloadManager.EXTRA_DOWNLOAD_ID, -1L)
+            if (completedId == -1L || completedId != pendingDownloadId) return
+            val manager = getSystemService(DOWNLOAD_SERVICE) as DownloadManager
+            val query = DownloadManager.Query().setFilterById(completedId)
+            manager.query(query).use { cursor ->
+                if (!cursor.moveToFirst()) return
+                val statusIndex = cursor.getColumnIndex(DownloadManager.COLUMN_STATUS)
+                val status = if (statusIndex >= 0) cursor.getInt(statusIndex) else -1
+                if (status != DownloadManager.STATUS_SUCCESSFUL) {
+                    runOnUiThread { Toast.makeText(this@MainActivity, "Pobieranie APK nie powiodło się. Spróbuj ponownie.", Toast.LENGTH_LONG).show() }
+                    return
+                }
+            }
+            val apkUri = manager.getUriForDownloadedFile(completedId)
+            if (apkUri == null) {
+                runOnUiThread { Toast.makeText(this@MainActivity, "Pobrano plik, ale Android nie udostępnił go instalatorowi. Otwórz folder Pobrane.", Toast.LENGTH_LONG).show() }
+                return
+            }
+            runOnUiThread {
+                try {
+                    val installIntent = Intent(Intent.ACTION_VIEW).apply {
+                        setDataAndType(apkUri, "application/vnd.android.package-archive")
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION or Intent.FLAG_ACTIVITY_NEW_TASK)
+                    }
+                    startActivity(installIntent)
+                } catch (e: Exception) {
+                    AlertDialog.Builder(this@MainActivity).setTitle("Nie można otworzyć instalatora")
+                        .setMessage("Otwórz plik APK z folderu Pobrane. " + (e.localizedMessage ?: ""))
+                        .setPositiveButton("OK", null).show()
+                }
+            }
+        }
+    }
+
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -112,6 +155,8 @@ class MainActivity : ComponentActivity() {
         }
 
         setContentView(root)
+        ContextCompat.registerReceiver(this, downloadCompleteReceiver, IntentFilter(DownloadManager.ACTION_DOWNLOAD_COMPLETE), ContextCompat.RECEIVER_EXPORTED)
+        downloadReceiverRegistered = true
         statusView.text = "WariatCam • kamera lokalna (test)"
         statusView.setOnClickListener { checkForUpdates() }
 
@@ -213,7 +258,7 @@ class MainActivity : ComponentActivity() {
                     Environment.DIRECTORY_DOWNLOADS,
                     "WariatCam-$tag.apk"
                 )
-            manager.enqueue(request)
+            pendingDownloadId = manager.enqueue(request)
             statusView.text = "WariatCam • pobieranie aktualizacji…"
             Toast.makeText(
                 this,
@@ -273,6 +318,10 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        if (downloadReceiverRegistered) {
+            try { unregisterReceiver(downloadCompleteReceiver) } catch (_: Exception) {}
+            downloadReceiverRegistered = false
+        }
         updateExecutor.shutdown()
         super.onDestroy()
     }
