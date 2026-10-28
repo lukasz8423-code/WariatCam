@@ -9,6 +9,14 @@
         android:label="WariatCam"
         android:supportsRtl="true"
         android:theme="@style/Theme.WariatCam">
+        <receiver
+            android:name=".ApkDownloadReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.DOWNLOAD_COMPLETE" />
+            </intent-filter>
+        </receiver>
         <activity
             android:name=".MainActivity"
             android:screenOrientation="unspecified"
