@@ -11,6 +11,10 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
+import android.graphics.Paint
+import android.view.View
 import android.view.Gravity
 import android.view.ViewGroup
 import android.widget.Button
@@ -20,6 +24,7 @@ import android.widget.TextView
 import androidx.activity.ComponentActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.extensions.ExtensionMode
@@ -34,8 +39,12 @@ class MainActivity : ComponentActivity() {
     private lateinit var previewView: PreviewView
     private lateinit var statusView: TextView
     private lateinit var nightButton: Button
+    private lateinit var torchButton: Button
     private var camera: Camera? = null
     private var nightModeOn = false
+    private var grayscaleOn = false
+    private var torchOn = false
+    private var lastLuma = 255
     private var previousExposureIndex = 0
     private var cameraProvider: ProcessCameraProvider? = null
     private var nightCameraSelector: CameraSelector? = null
@@ -77,11 +86,16 @@ class MainActivity : ComponentActivity() {
             setOnClickListener { showMenu() }
         }
         nightButton = Button(this).apply {
-            text = "☾ NOCNY: WYŁ."
+            text = "☾ NOCNY: AUTO"
             setOnClickListener { toggleNightMode() }
         }
+        torchButton = Button(this).apply {
+            text = "LED: WYŁ."
+            setOnClickListener { toggleTorch() }
+        }
         controls.addView(menuButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        controls.addView(nightButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        controls.addView(nightButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f))
+        controls.addView(torchButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
         root.addView(controls, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
         ))
@@ -109,7 +123,8 @@ class MainActivity : ComponentActivity() {
 
     private fun showMenu() {
         val items = arrayOf(
-            if (nightModeOn) "Wyłącz tryb nocny" else "Włącz tryb nocny",
+            if (nightModeOn) "Wyłącz tryb nocny automatyczny" else "Włącz tryb nocny automatyczny",
+            if (torchOn) "Wyłącz lampę LED" else "Włącz lampę LED",
             "Sprawdź aktualizacje",
             "Jak działa tryb nocny?"
         )
@@ -118,10 +133,11 @@ class MainActivity : ComponentActivity() {
             .setItems(items) { _, which ->
                 when (which) {
                     0 -> toggleNightMode()
-                    1 -> checkForUpdates()
-                    2 -> AlertDialog.Builder(this)
-                        .setTitle("Tryb nocny")
-                        .setMessage("Tryb nocny zwiększa kompensację ekspozycji aparatu, aby obraz był jaśniejszy przy słabym oświetleniu. Może pojawić się więcej szumu i rozmycia. To nie jest noktowizja na podczerwień IR — do niej potrzebny jest czujnik i oświetlacz IR.")
+                    1 -> toggleTorch()
+                    2 -> checkForUpdates()
+                    3 -> AlertDialog.Builder(this)
+                        .setTitle("Tryb nocny automatyczny")
+                        .setMessage("WariatCam analizuje jasność obrazu. Po wykryciu ciemności przełącza podgląd na czarno-biały i zwiększa ekspozycję, jeśli aparat na to pozwala. Lampę LED możesz włączyć osobnym przyciskiem. To nie jest prawdziwa noktowizja IR — telefon nie ma gwarantowanego oświetlacza podczerwieni przy tylnym aparacie.")
                         .setPositiveButton("OK", null).show()
                 }
             }
@@ -130,50 +146,56 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun toggleNightMode() {
-        val currentCamera = camera
-        if (currentCamera == null) {
-            AlertDialog.Builder(this).setMessage("Kamera jeszcze się uruchamia. Spróbuj za chwilę.")
-                .setPositiveButton("OK", null).show()
-            return
-        }
+        nightModeOn = !nightModeOn
         if (!nightModeOn) {
-            val extensionSelector = nightCameraSelector
-            if (extensionSelector != null) {
-                bindCamera(extensionSelector)
-                nightModeOn = true
-                nightButton.text = "☾ NOCNY: WŁ."
-                return
+            setGrayscale(false)
+            camera?.let { cam ->
+                val range = cam.cameraInfo.exposureState.exposureCompensationRange
+                cam.cameraControl.setExposureCompensationIndex(previousExposureIndex.coerceIn(range.lower, range.upper))
             }
-            val exposureState = currentCamera.cameraInfo.exposureState
-            val range = exposureState.exposureCompensationRange
-            if (range.lower == 0 && range.upper == 0) {
-                AlertDialog.Builder(this).setTitle("Tryb nocny niedostępny")
-                    .setMessage("Ten aparat nie udostępnia trybu nocnego CameraX ani regulacji ekspozycji. Nie zmieniamy ustawień lampy LED.")
-                    .setPositiveButton("OK", null).show()
-                return
-            }
-            previousExposureIndex = exposureState.exposureCompensationIndex
-            val target = minOf(range.upper, maxOf(1, range.upper / 2))
-            currentCamera.cameraControl.setExposureCompensationIndex(target)
-            nightModeOn = true
-            nightButton.text = "☾ NOCNY: WŁ."
+            nightButton.text = "☾ NOCNY: AUTO"
+            statusView.text = "WariatCam • tryb dzienny"
         } else {
-            val provider = cameraProvider
-            if (provider != null) {
-                bindCamera(CameraSelector.DEFAULT_BACK_CAMERA)
-            } else {
-                currentCamera.cameraControl.setExposureCompensationIndex(
-                    previousExposureIndex.coerceIn(
-                        currentCamera.cameraInfo.exposureState.exposureCompensationRange.lower,
-                        currentCamera.cameraInfo.exposureState.exposureCompensationRange.upper
-                    )
-                )
-            }
-            nightModeOn = false
-            nightButton.text = "☾ NOCNY: WYŁ."
+            camera?.let { cam -> previousExposureIndex = cam.cameraInfo.exposureState.exposureCompensationIndex }
+            nightButton.text = "☾ NOCNY: WŁ."
+            applyLowLight(lastLuma)
         }
     }
 
+    private fun setGrayscale(enabled: Boolean) {
+        grayscaleOn = enabled
+        val paint = if (enabled) Paint().apply {
+            colorFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(0f) })
+        } else null
+        previewView.setLayerType(View.LAYER_TYPE_HARDWARE, paint)
+    }
+
+    private fun applyLowLight(luma: Int) {
+        if (!nightModeOn) return
+        val shouldBeNight = if (grayscaleOn) luma < 86 else luma < 62
+        setGrayscale(shouldBeNight)
+        camera?.let { cam ->
+            val range = cam.cameraInfo.exposureState.exposureCompensationRange
+            if (range.lower != range.upper) {
+                val target = if (shouldBeNight) minOf(range.upper, maxOf(1, range.upper / 2)) else previousExposureIndex
+                cam.cameraControl.setExposureCompensationIndex(target.coerceIn(range.lower, range.upper))
+            }
+        }
+        statusView.text = if (shouldBeNight) "WariatCam • TRYB NOCNY • obraz B/W" else "WariatCam • tryb dzienny • kolor"
+    }
+
+    private fun toggleTorch() {
+        val cam = camera
+        if (cam == null || !cam.cameraInfo.hasFlashUnit()) {
+            AlertDialog.Builder(this).setTitle("Lampa niedostępna")
+                .setMessage("Ten aparat nie udostępnia lampy LED dla aplikacji.")
+                .setPositiveButton("OK", null).show()
+            return
+        }
+        torchOn = !torchOn
+        cam.cameraControl.enableTorch(torchOn)
+        torchButton.text = if (torchOn) "LED: WŁ." else "LED: WYŁ."
+    }
     private fun checkForUpdates() {
         statusView.text = "WariatCam • sprawdzam aktualizacje…"
         updateExecutor.execute {
@@ -237,13 +259,29 @@ class MainActivity : ComponentActivity() {
 
     private fun bindCamera(selector: CameraSelector) {
         val provider = cameraProvider ?: return
-        val preview = Preview.Builder().build().also {
-            it.surfaceProvider = previewView.surfaceProvider
+        val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
+        val analysis = ImageAnalysis.Builder()
+            .setTargetResolution(android.util.Size(320, 240))
+            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            .build()
+        analysis.setAnalyzer(updateExecutor) { image ->
+            try {
+                val buffer = image.planes[0].buffer
+                var sum = 0L
+                var count = 0
+                while (buffer.hasRemaining()) { sum += (buffer.get().toInt() and 0xFF); count++ }
+                if (count > 0) {
+                    val luma = (sum / count).toInt()
+                    lastLuma = luma
+                    if (nightModeOn) runOnUiThread { applyLowLight(luma) }
+                }
+            } catch (_: Exception) {
+            } finally { image.close() }
         }
         provider.unbindAll()
-        camera = provider.bindToLifecycle(this, selector, preview)
+        camera = provider.bindToLifecycle(this, selector, preview, analysis)
+        torchButton.isEnabled = camera?.cameraInfo?.hasFlashUnit() == true
     }
-
     private fun startCamera() {
         statusView.text = "WariatCam • kamera lokalna (test)"
         val providerFuture = ProcessCameraProvider.getInstance(this)
@@ -251,17 +289,9 @@ class MainActivity : ComponentActivity() {
             try {
                 val provider = providerFuture.get()
                 cameraProvider = provider
-                try {
-                    val extensions = ExtensionsManager.getInstanceAsync(this, provider).get()
-                    nightCameraSelector = if (extensions.isExtensionAvailable(CameraSelector.DEFAULT_BACK_CAMERA, ExtensionMode.NIGHT)) {
-                        extensions.getExtensionEnabledCameraSelector(CameraSelector.DEFAULT_BACK_CAMERA, ExtensionMode.NIGHT)
-                    } else null
-                } catch (_: Exception) {
-                    nightCameraSelector = null
-                }
+                nightCameraSelector = null
                 bindCamera(CameraSelector.DEFAULT_BACK_CAMERA)
-                nightButton.isEnabled = nightCameraSelector != null ||
-                    camera?.cameraInfo?.exposureState?.exposureCompensationRange?.let { it.lower != 0 || it.upper != 0 } == true
+                nightButton.isEnabled = true
             } catch (error: Exception) {
                 statusView.text = "Nie udało się uruchomić kamery: ${error.localizedMessage ?: "błąd"}"
             }
