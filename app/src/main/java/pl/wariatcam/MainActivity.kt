@@ -54,6 +54,7 @@ class MainActivity : ComponentActivity() {
     private var previousExposureIndex = 0
     private var cameraProvider: ProcessCameraProvider? = null
     private var nightCameraSelector: CameraSelector? = null
+    private var nightExtensionStatus = "Nie sprawdzono jeszcze obsługi sprzętowego Night."
     private val cameraPermissionRequest = 1001
     private val updateExecutor = Executors.newSingleThreadExecutor()
 
@@ -144,7 +145,7 @@ class MainActivity : ComponentActivity() {
                     2 -> checkForUpdates()
                     3 -> AlertDialog.Builder(this)
                         .setTitle("Tryb nocny automatyczny")
-                        .setMessage("WariatCam analizuje jasność obrazu. Po wykryciu ciemności przełącza podgląd na czarno-biały i zwiększa ekspozycję, jeśli aparat na to pozwala. Lampę LED możesz włączyć osobnym przyciskiem. To nie jest prawdziwa noktowizja IR — telefon nie ma gwarantowanego oświetlacza podczerwieni przy tylnym aparacie.")
+                        .setMessage("WariatCam analizuje jasność obrazu. Obecny tryb nocny zmienia obraz na czarno-biały i próbuje zwiększyć ekspozycję — sam w sobie nie wykonuje wieloklatkowego przetwarzania nocnego.\\n\\nObsługa sprzętowego CameraX Night: $nightExtensionStatus\\n\\nTo nie jest noktowizja IR. Lampę LED możesz włączyć osobnym przyciskiem.")
                         .setPositiveButton("OK", null).show()
                 }
             }
@@ -329,6 +330,22 @@ class MainActivity : ComponentActivity() {
                 cameraProvider = provider
                 nightCameraSelector = null
                 bindCamera(CameraSelector.DEFAULT_BACK_CAMERA)
+                // Sprawdź możliwości tego konkretnego telefonu przez CameraX Extensions.
+                // Wynik pokazujemy w istniejącym oknie pomocy, bez zmiany układu aplikacji.
+                nightExtensionStatus = "Sprawdzanie obsługi przez aparat…"
+                val extensionsFuture = ExtensionsManager.getInstance(this, provider)
+                extensionsFuture.addListener({
+                    nightExtensionStatus = try {
+                        val extensions = extensionsFuture.get()
+                        if (extensions.isExtensionAvailable(CameraSelector.DEFAULT_BACK_CAMERA, ExtensionMode.NIGHT)) {
+                            "TAK — telefon udostępnia rozszerzenie Night. Nie jest jeszcze aktywowane w podglądzie."
+                        } else {
+                            "NIE — CameraX nie udostępnia rozszerzenia Night dla tylnego aparatu."
+                        }
+                    } catch (e: Exception) {
+                        "Nie udało się sprawdzić: ${e.localizedMessage ?: "błąd CameraX"}"
+                    }
+                }, ContextCompat.getMainExecutor(this))
                 nightButton.isEnabled = true
             } catch (error: Exception) {
                 statusView.text = "Nie udało się uruchomić kamery: ${error.localizedMessage ?: "błąd"}"
