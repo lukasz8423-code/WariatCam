@@ -194,16 +194,30 @@ class MainActivity : ComponentActivity() {
 
     private fun applyLowLight(luma: Int) {
         if (!nightModeOn) return
-        val shouldBeNight = if (grayscaleOn) luma < 86 else luma < 62
-        setGrayscale(shouldBeNight)
+
+        // Tryb nocny ma zachować kolory. Zamiast przełączać podgląd na B/W,
+        // dobieramy kompensację ekspozycji do jasności sceny.
+        setGrayscale(false)
         camera?.let { cam ->
             val range = cam.cameraInfo.exposureState.exposureCompensationRange
             if (range.lower != range.upper) {
-                val target = if (shouldBeNight) minOf(range.upper, maxOf(1, range.upper / 2)) else previousExposureIndex
-                cam.cameraControl.setExposureCompensationIndex(target.coerceIn(range.lower, range.upper))
+                val positiveRange = range.upper.coerceAtLeast(0)
+                val target = when {
+                    luma < 75 -> positiveRange
+                    luma < 115 -> positiveRange / 2
+                    luma < 155 -> positiveRange / 3
+                    else -> previousExposureIndex
+                }
+                cam.cameraControl.setExposureCompensationIndex(
+                    target.coerceIn(range.lower, range.upper)
+                )
             }
         }
-        statusView.text = if (shouldBeNight) "WariatCam • TRYB NOCNY • obraz B/W" else "WariatCam • tryb dzienny • kolor"
+        statusView.text = when {
+            luma < 115 -> "WariatCam • TRYB NOCNY • kolor • mocne rozjaśnianie"
+            luma < 155 -> "WariatCam • TRYB NOCNY • kolor • rozjaśnianie"
+            else -> "WariatCam • TRYB NOCNY • kolor"
+        }
     }
 
     private fun toggleTorch() {
