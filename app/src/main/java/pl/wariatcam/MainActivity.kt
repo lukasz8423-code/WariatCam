@@ -333,7 +333,7 @@ class MainActivity : ComponentActivity() {
                 // Sprawdź możliwości tego konkretnego telefonu przez CameraX Extensions.
                 // Wynik pokazujemy w istniejącym oknie pomocy, bez zmiany układu aplikacji.
                 nightExtensionStatus = "Sprawdzanie obsługi przez aparat…"
-                val extensionsFuture = ExtensionsManager.getInstance(this, provider)
+                val extensionsFuture = ExtensionsManager.getInstanceAsync(this, provider)
                 extensionsFuture.addListener({
                     nightExtensionStatus = try {
                         val extensions = extensionsFuture.get()
