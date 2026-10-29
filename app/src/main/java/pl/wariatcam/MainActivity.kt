@@ -17,6 +17,11 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.util.concurrent.Executors
 import android.graphics.Color
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
+import android.content.ContentValues
+import android.provider.MediaStore
+import java.io.File
 import android.graphics.ColorMatrix
 import android.graphics.ColorMatrixColorFilter
 import android.graphics.Paint
@@ -31,6 +36,8 @@ import androidx.activity.ComponentActivity
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageCapture
+import androidx.camera.core.ImageCaptureException
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.extensions.ExtensionMode
@@ -46,7 +53,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var statusView: TextView
     private lateinit var nightButton: Button
     private lateinit var torchButton: Button
+    private lateinit var photoButton: Button
     private var camera: Camera? = null
+    private var imageCapture: ImageCapture? = null
     private var nightModeOn = false
     private var grayscaleOn = false
     private var torchOn = false
@@ -101,9 +110,14 @@ class MainActivity : ComponentActivity() {
             text = "LED: WYŁ."
             setOnClickListener { toggleTorch() }
         }
+        photoButton = Button(this).apply {
+            text = "FOTO"
+            setOnClickListener { capturePhoto() }
+        }
         controls.addView(menuButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
-        controls.addView(nightButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.2f))
-        controls.addView(torchButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        controls.addView(nightButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.1f))
+        controls.addView(photoButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.8f))
+        controls.addView(torchButton, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 0.9f))
         root.addView(controls, FrameLayout.LayoutParams(
             ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM
         ))
@@ -299,6 +313,7 @@ class MainActivity : ComponentActivity() {
     private fun bindCamera(selector: CameraSelector) {
         val provider = cameraProvider ?: return
         val preview = Preview.Builder().build().also { it.surfaceProvider = previewView.surfaceProvider }
+        imageCapture = ImageCapture.Builder().setCaptureMode(ImageCapture.CAPTURE_MODE_MAXIMIZE_QUALITY).build()
         val analysis = ImageAnalysis.Builder()
             .setTargetResolution(android.util.Size(320, 240))
             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -318,9 +333,80 @@ class MainActivity : ComponentActivity() {
             } finally { image.close() }
         }
         provider.unbindAll()
-        camera = provider.bindToLifecycle(this, selector, preview, analysis)
+        camera = provider.bindToLifecycle(this, selector, preview, analysis, imageCapture)
         torchButton.isEnabled = camera?.cameraInfo?.hasFlashUnit() == true
     }
+    private fun capturePhoto() {
+        val capture = imageCapture
+        if (capture == null) { Toast.makeText(this, "Aparat jeszcze się uruchamia.", Toast.LENGTH_SHORT).show(); return }
+        photoButton.isEnabled = false
+        statusView.text = if (nightModeOn) "WariatCam • łączenie 4 klatek nocnych…" else "WariatCam • wykonywanie zdjęcia…"
+        val count = if (nightModeOn) 4 else 1
+        val files = mutableListOf<File>()
+        fun next(index: Int) {
+            if (index >= count) {
+                try {
+                    val frames = files.mapNotNull { BitmapFactory.decodeFile(it.absolutePath) }
+                    if (frames.size != count) throw IllegalStateException("Nie udało się odczytać wszystkich klatek.")
+                    val result = if (count == 1) frames[0] else mergeNightFrames(frames)
+                    savePhoto(result)
+                    files.forEach { it.delete() }
+                    photoButton.isEnabled = true
+                    statusView.text = if (nightModeOn) "WariatCam • zdjęcie nocne zapisane (4 klatki)" else "WariatCam • zdjęcie zapisane"
+                    Toast.makeText(this, "Zdjęcie zapisane w Galerii / Pictures / WariatCam", Toast.LENGTH_LONG).show()
+                } catch (e: Exception) {
+                    files.forEach { it.delete() }; photoButton.isEnabled = true
+                    statusView.text = "WariatCam • błąd zapisu zdjęcia"
+                    Toast.makeText(this, e.localizedMessage ?: "Nie udało się połączyć zdjęć.", Toast.LENGTH_LONG).show()
+                }
+                return
+            }
+            val file = File(cacheDir, "wariatcam_${System.currentTimeMillis()}_$index.jpg")
+            capture.takePicture(ImageCapture.OutputFileOptions.Builder(file).build(), ContextCompat.getMainExecutor(this), object : ImageCapture.OnImageSavedCallback {
+                override fun onImageSaved(output: ImageCapture.OutputFileResults) { files.add(file); next(index + 1) }
+                override fun onError(exception: ImageCaptureException) {
+                    files.forEach { it.delete() }; file.delete(); photoButton.isEnabled = true
+                    statusView.text = "WariatCam • nie udało się zrobić zdjęcia"
+                    Toast.makeText(this@MainActivity, exception.localizedMessage ?: "Błąd aparatu", Toast.LENGTH_LONG).show()
+                }
+            })
+        }
+        next(0)
+    }
+
+    // Uśrednianie 4 klatek redukuje losowy szum; telefon trzeba trzymać nieruchomo.
+    private fun mergeNightFrames(frames: List<Bitmap>): Bitmap {
+        val width = frames.minOf { it.width }; val height = frames.minOf { it.height }
+        val scaled = frames.map { if (it.width == width && it.height == height) it else Bitmap.createScaledBitmap(it, width, height, true) }
+        val samples = Array(scaled.size) { IntArray(width * height) }
+        scaled.forEachIndexed { i, bitmap -> bitmap.getPixels(samples[i], 0, width, 0, 0, width, height) }
+        val pixels = IntArray(width * height)
+        for (p in pixels.indices) {
+            var a = 0; var r = 0; var g = 0; var b = 0
+            for (sample in samples) { val color = sample[p]; a += Color.alpha(color); r += Color.red(color); g += Color.green(color); b += Color.blue(color) }
+            val n = samples.size; pixels[p] = Color.argb(a / n, r / n, g / n, b / n)
+        }
+        val result = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        result.setPixels(pixels, 0, width, 0, 0, width, height)
+        scaled.forEach { it.recycle() }
+        return result
+    }
+
+    private fun savePhoto(bitmap: Bitmap) {
+        val values = ContentValues().apply {
+            put(MediaStore.Images.Media.DISPLAY_NAME, "WariatCam_${System.currentTimeMillis()}.jpg")
+            put(MediaStore.Images.Media.MIME_TYPE, "image/jpeg")
+            put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/WariatCam")
+        }
+        val uri = contentResolver.insert(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, values)
+            ?: throw IllegalStateException("Android nie udostępnił miejsca na zdjęcie.")
+        try {
+            contentResolver.openOutputStream(uri)?.use { if (!bitmap.compress(Bitmap.CompressFormat.JPEG, 95, it)) throw IllegalStateException("Błąd zapisu JPEG.") }
+                ?: throw IllegalStateException("Nie udało się otworzyć pliku zdjęcia.")
+        } catch (e: Exception) { contentResolver.delete(uri, null, null); throw e }
+        finally { bitmap.recycle() }
+    }
+
     private fun startCamera() {
         statusView.text = "WariatCam • kamera lokalna (test)"
         val providerFuture = ProcessCameraProvider.getInstance(this)
